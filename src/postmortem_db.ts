@@ -6,6 +6,7 @@ const BSON = require('bson');
 import * as assert from "assert";
 import { db_spawner } from "./db_spawner";
 import { MongoClient, Db } from "mongodb";
+import { decodedTextSpanIntersectsWith } from "typescript";
 
 namespace postmortem_db {
   export class PostmortemDb {
@@ -14,6 +15,7 @@ namespace postmortem_db {
     path: string;
     db: MongoClient;
     incidentDb: Db;
+    filter: string;
 
     constructor(uri: string, incident: string) {
       this.uri = uri;
@@ -23,6 +25,9 @@ namespace postmortem_db {
 
     setPath(path: string) {
       this.path = path;
+    }
+    setFilter(filter: string) {
+      this.filter = filter;
     }
 
     async init() {
@@ -50,7 +55,7 @@ namespace postmortem_db {
       }
       if (!this.path)
         throw "--path is required to init the Metadata for the first time";
-      console.log("Create new Meta reacord");
+      console.log("Create new Meta record");
       var insertResult = await coll.insertOne({
         incident: this.incident,
         path: this.path,
@@ -65,13 +70,18 @@ namespace postmortem_db {
       var dataPath = path.join(this.path, "data/db/job0/resmoke/");
       for (const replicaSet of fs.readdirSync(dataPath)) {
           for (const node of fs.readdirSync(path.join(dataPath, replicaSet))) {
+            let nodePath: string = path.join(dataPath, replicaSet, node);
+            if (this.filter && !nodePath.match(this.filter)) {
+              console.log('Skipping node ' + nodePath + ' as not matching the filter');
+              continue;
+            }
             console.log(
               "Checking node " + node + " for replica set " + replicaSet
             );
-            var result = await this.loadDataForNodeIfNeeded(
+            let result = await this.loadDataForNodeIfNeeded(
               replicaSet,
               node,
-              path.join(dataPath, replicaSet, node)
+              nodePath
             );
             console.log(result);
         }
@@ -140,23 +150,55 @@ namespace postmortem_db {
       spawner: db_spawner.DbSpawner,
       targetCollection: string
     ): Promise<JSON> {
-      var count: number = 1;
+      console.log('load oplog...');
+      let count: number = 0;
+      let self: PostmortemDb = this;
+      let oplogData: Array<JSON> = [];
       await (await spawner.loadData('local', 'oplog.rs')).forEach(
         function(doc: any) {
-          count++;
-          doc['_id'] = replicaSet + '_' + node + '_' + String(count);
-          doc['replicaSet'] = replicaSet;
-          doc['node'] = node;
-          //console.log(doc);
-          if (doc['ui']) {
-            //console.log(doc['ui']['buffer']);
-            //doc['ui_data'] = BSON.deserialize(doc['ui']['buffer']);
-          }
+            count++;
+            doc['_id'] = replicaSet + '_' + node + '_' + String(count);
+            doc['replicaSet'] = replicaSet;
+            doc['node'] = node;
+            doc['count'] = count;
+            if (doc['ui']) {
+              doc['ui_data'] = self.decodeId(doc['ui']['buffer']);
+            }
+            // Fix the $ prefix
+            if (doc['o'] && doc['o']['$v']) {
+              doc['o']['_$v'] = doc['o']['$v'];
+              delete doc['o']['$v'];
+            }
+            //console.log(doc);
+            oplogData.push(doc);
+          });
+      console.log(`loaded ${oplogData.length} oplog documents`);
 
+      for (const doc of oplogData) {
+        try {
+          let res = await self.incidentDb.collection("oplog").update(
+            { _id: doc['_id'] },
+            doc,
+            { upsert: true }
+          );
+          //console.log(res.result);
+        } catch(err) {
+          console.log(`Failed: ${err} in `, doc);
         }
-      )
+      }
 
       return <JSON>{};
+    }
+
+    decodeId(id: string) {
+      return Buffer.from(id, 'base64').toString('binary');
+    }
+
+    // Helper to execute an array of async callbacks.
+    async asyncForEach(array: any, callback: any) {
+      for (let index = 0; index < array.length; index++) {
+        await callback(array[index], index, array);
+      }
     }
   }
 } // namespace

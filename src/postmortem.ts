@@ -11,7 +11,8 @@ function help() {
   console.log(`Help:
       --url: MongoDB connection
       --incident: ID of the incident to use
-      --path: path to incident data (uncompressed), should cotwain 'data' and 'logs' dirs
+      --path: path to incident data (uncompressed), should contain 'data' and 'logs' dirs
+      --filter: node subpath regex to load, instead of circling all paths
       `);
 }
 
@@ -23,6 +24,9 @@ if (!argv.url || !argv.incident || argv.help) {
 let db = new postmortem_db.PostmortemDb(argv["url"], argv["incident"]);
 if (argv["path"]) {
   db.setPath(argv["path"]);
+}
+if (argv.filter) {
+  db.setFilter(argv.filter);
 }
 
 db.init()
